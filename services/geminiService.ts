@@ -1,12 +1,17 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { SimulationSchema } from "../types";
 
-// Initialize Gemini
-// The API key is injected automatically via process.env.API_KEY
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const modelId = 'gemini-2.5-flash';
+
+// Helper to get the AI client only when needed (Lazy Loading)
+// This prevents the app from crashing on startup if the API KEY is missing
+const getAiClient = () => {
+  const apiKey = process.env.API_KEY || (window as any).API_KEY || ''; // Try multiple sources
+  if (!apiKey) {
+    throw new Error("Falta la API KEY. Configúrala en Vercel (Settings -> Environment Variables -> API_KEY).");
+  }
+  return new GoogleGenAI({ apiKey });
+};
 
 // Helper to clean JSON string from Markdown code blocks
 const cleanJsonText = (text: string): string => {
@@ -24,6 +29,9 @@ const cleanJsonText = (text: string): string => {
 
 export const analyzeProblemForSimulation = async (problemText: string): Promise<SimulationSchema> => {
   try {
+    // Initialize client HERE, not at the top of the file
+    const ai = getAiClient();
+
     const prompt = `
       Actúa como un profesor senior de matemáticas y científico de datos.
       Analiza el texto proporcionado (que puede contener uno o varios problemas) y genera un modelo de simulación completo.
@@ -109,8 +117,6 @@ export const analyzeProblemForSimulation = async (problemText: string): Promise<
         const parsed = JSON.parse(cleaned) as SimulationSchema;
         
         // --- Validation & Defaults ---
-        
-        // 1. Independent Variables
         if (!parsed.independentVariables || !Array.isArray(parsed.independentVariables)) {
             parsed.independentVariables = [{
                 name: "Tiempo", symbol: "t", min: 0, max: 20, default: 0, step: 1, description: "Variable independiente"
@@ -126,7 +132,6 @@ export const analyzeProblemForSimulation = async (problemText: string): Promise<
             description: v.description || ""
         }));
 
-        // 2. Outputs (Dependent Variables)
         const legacyDep = (parsed as any).dependentVariable;
         if (!parsed.outputs && legacyDep) {
              parsed.outputs = [{
@@ -138,7 +143,6 @@ export const analyzeProblemForSimulation = async (problemText: string): Promise<
             parsed.outputs = [{ name: "f(x)", symbol: "y", unit: "" }];
         }
 
-        // 3. Ensure JS Formula has return
         if (!parsed.jsFormula) parsed.jsFormula = "return 0;";
         if (!parsed.jsFormula.includes("return")) parsed.jsFormula = "return " + parsed.jsFormula;
 
@@ -150,18 +154,19 @@ export const analyzeProblemForSimulation = async (problemText: string): Promise<
     console.error("Gemini API Error:", error);
     return {
         title: "Error de Análisis",
-        description: "No se pudo interpretar el problema. Intenta simplificar el texto.",
+        description: (error as Error).message || "No se pudo interpretar el problema.",
         independentVariables: [{ name: "x", symbol: "x", min: -10, max: 10, default: 0, step: 1, description: "" }],
         outputs: [{ name: "Error", symbol: "y" }],
         jsFormula: "return 0;",
         pythonFormula: "0",
-        analysisMarkdown: `### Error\n\n${(error as Error).message}`
+        analysisMarkdown: `### Error\n\n${(error as Error).message}. Asegúrate de haber configurado la API KEY en Vercel.`
     };
   }
 };
 
 export const explainMathConcept = async (context: string, question: string): Promise<string> => {
   try {
+    const ai = getAiClient(); // Initialize client HERE too
     const prompt = `
       Eres un profesor de matemáticas y ciencia de datos.
       Contexto: ${context}
@@ -171,6 +176,6 @@ export const explainMathConcept = async (context: string, question: string): Pro
     const response = await ai.models.generateContent({ model: modelId, contents: prompt });
     return response.text || "No se pudo generar explicación.";
   } catch (error) {
-    return "Error al conectar con tutor.";
+    return "Error al conectar con tutor. Verifica tu API Key.";
   }
 };
