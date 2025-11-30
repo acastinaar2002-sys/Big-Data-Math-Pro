@@ -1,22 +1,15 @@
-
-import React, { useState, useRef, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot } from 'recharts';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot, Brush, ReferenceLine } from 'recharts';
 import { analyzeProblemForSimulation } from '../services/geminiService';
 import { SimulationSchema, DataPoint } from '../types';
-import { Play, Download, Table, Code, Activity, RefreshCw, ChevronDown, ChevronUp, FileText, BarChart2, AlertCircle, Eye, EyeOff, Layers } from 'lucide-react';
+import { Play, Download, Table, Code, Activity, RefreshCw, ChevronDown, ChevronUp, FileText, BarChart2, AlertCircle, Eye, EyeOff, Layers, ZoomIn, Search } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
-// Apple-style color palette for multiple lines
-const COLORS = [
-  "#007AFF", // Blue
-  "#34C759", // Green
-  "#FF9500", // Orange
-  "#FF3B30", // Red
-  "#AF52DE", // Purple
-  "#5AC8FA", // Teal
-  "#FF2D55", // Pink
-  "#5856D6"  // Indigo
-];
+// Dynamic color generator for infinite lines
+const getColor = (index: number) => {
+  const hue = (index * 137.508) % 360; // Golden angle approximation
+  return `hsl(${hue}, 70%, 50%)`;
+};
 
 const UniversalSimulator: React.FC = () => {
   // Input State
@@ -27,24 +20,21 @@ const UniversalSimulator: React.FC = () => {
   // Simulation Model State
   const [schema, setSchema] = useState<SimulationSchema | null>(null);
   const [variables, setVariables] = useState<Record<string, number>>({});
-  const [dataCount, setDataCount] = useState<number>(50); // Number of data points to generate
+  const [dataCount, setDataCount] = useState<number>(100); 
   
-  // Data State
-  const [generatedData, setGeneratedData] = useState<DataPoint[]>([]);
+  // View State
   const [viewMode, setViewMode] = useState<'chart' | 'table'>('chart');
-  
-  // UI State
-  const analysisRef = useRef<HTMLDivElement>(null);
   const [showAnalysis, setShowAnalysis] = useState(true);
   const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
+  const analysisRef = useRef<HTMLDivElement>(null);
 
+  // --- 1. ANALYSIS ENGINE ---
   const handleAnalyze = async () => {
     if (!problemText.trim()) return;
     setIsAnalyzing(true);
     setErrorMsg(null);
     setSchema(null);
-    setGeneratedData([]);
-    setHiddenLines(new Set()); // Reset visibility
+    setHiddenLines(new Set());
     
     try {
       const result = await analyzeProblemForSimulation(problemText);
@@ -69,9 +59,6 @@ const UniversalSimulator: React.FC = () => {
       }
       setVariables(initialVars);
       
-      // Auto generate initial data
-      generateDataset(result, initialVars, dataCount);
-      
       // Scroll to analysis
       setTimeout(() => {
         analysisRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -85,76 +72,112 @@ const UniversalSimulator: React.FC = () => {
     }
   };
 
-  const generateDataset = (currentSchema: SimulationSchema, currentVars: Record<string, number>, count: number) => {
-    if (!currentSchema || !currentSchema.independentVariables || currentSchema.independentVariables.length === 0) return;
-
-    const data: DataPoint[] = [];
-    
-    // Find the "primary" independent variable to iterate over (usually time or x)
-    const primaryVar = currentSchema.independentVariables[0];
-    if (!primaryVar) return;
-
-    // Safety check for min/max
-    const minVal = typeof primaryVar.min === 'number' ? primaryVar.min : -10;
-    const maxVal = typeof primaryVar.max === 'number' ? primaryVar.max : 10;
-    const step = (maxVal - minVal) / count;
-
-    for (let i = 0; i <= count; i++) {
-      const currentX = parseFloat((minVal + (i * step)).toFixed(2));
-      
-      // Construct the execution context
-      const contextVars = { ...currentVars, [primaryVar.symbol]: currentX };
-      
-      try {
-        const keys = Object.keys(contextVars);
-        const values = Object.values(contextVars);
-        
-        // Execute the JS formula. It might return a number OR an object
-        // Example formula: "return { F: 4*x+3, G: 4*x-3 };"
-        const func = new Function(...keys, currentSchema.jsFormula);
-        const resultRaw = func(...values);
-
-        const point: DataPoint = {
-            [primaryVar.symbol]: currentX,
-            ...contextVars
-        };
-
-        // Handle Single Output vs Multiple Output
-        if (typeof resultRaw === 'object' && resultRaw !== null) {
-            // Multiple functions mapped
-            Object.keys(resultRaw).forEach(key => {
-                 point[key] = parseFloat(Number(resultRaw[key]).toFixed(4));
-            });
-        } else if (typeof resultRaw === 'number') {
-            // Single function fallback
-            const symbol = currentSchema.outputs[0]?.symbol || 'y';
-            point[symbol] = parseFloat(resultRaw.toFixed(4));
-        }
-
-        data.push(point);
-
-      } catch (e) {
-        console.error("Error executing formula for X=" + currentX, e);
+  // --- 2. DATA GENERATION ENGINE (Memoized) ---
+  const { generatedData, primaryAxisVar, outputs } = useMemo(() => {
+      if (!schema || !schema.independentVariables || schema.independentVariables.length === 0) {
+          return { generatedData: [], primaryAxisVar: null, outputs: [] };
       }
-    }
-    setGeneratedData(data);
-  };
 
+      const primaryVar = schema.independentVariables[0];
+      const outs = schema.outputs || [];
+      const data: DataPoint[] = [];
+
+      // Safety check
+      const minVal = typeof primaryVar.min === 'number' ? primaryVar.min : -10;
+      const maxVal = typeof primaryVar.max === 'number' ? primaryVar.max : 10;
+      const step = (maxVal - minVal) / dataCount;
+
+      for (let i = 0; i <= dataCount; i++) {
+          const currentX = parseFloat((minVal + (i * step)).toFixed(2));
+          const contextVars = { ...variables, [primaryVar.symbol]: currentX };
+          
+          try {
+              const keys = Object.keys(contextVars);
+              const values = Object.values(contextVars);
+              // Function construction
+              const func = new Function(...keys, schema.jsFormula);
+              const resultRaw = func(...values);
+
+              const point: DataPoint = {
+                  [primaryVar.symbol]: currentX,
+                  ...contextVars
+              };
+
+              if (typeof resultRaw === 'object' && resultRaw !== null) {
+                  Object.keys(resultRaw).forEach(key => {
+                      point[key] = parseFloat(Number(resultRaw[key]).toFixed(4));
+                  });
+              } else if (typeof resultRaw === 'number') {
+                  const symbol = outs[0]?.symbol || 'y';
+                  point[symbol] = parseFloat(resultRaw.toFixed(4));
+              }
+              data.push(point);
+          } catch (e) {
+              console.warn("Math error at", currentX, e);
+          }
+      }
+
+      return { generatedData: data, primaryAxisVar: primaryVar, outputs: outs };
+
+  }, [schema, variables, dataCount]);
+
+  // --- 3. INTERSECTION DETECTION ENGINE ---
+  const intersections = useMemo(() => {
+      if (!generatedData.length || outputs.length < 2) return [];
+      const points: {x: number, y: number, label: string, color: string}[] = [];
+      const activeOutputs = outputs.filter(o => !hiddenLines.has(o.symbol));
+
+      for (let i = 0; i < activeOutputs.length; i++) {
+          for (let j = i + 1; j < activeOutputs.length; j++) {
+              const lineA = activeOutputs[i];
+              const lineB = activeOutputs[j];
+
+              for (let k = 0; k < generatedData.length - 1; k++) {
+                  const p1 = generatedData[k];
+                  const p2 = generatedData[k+1];
+                  
+                  if (!primaryAxisVar) continue;
+                  
+                  const x1 = p1[primaryAxisVar.symbol] as number;
+                  const x2 = p2[primaryAxisVar.symbol] as number;
+                  const yA1 = p1[lineA.symbol] as number;
+                  const yB1 = p1[lineB.symbol] as number;
+                  const yA2 = p2[lineA.symbol] as number;
+                  const yB2 = p2[lineB.symbol] as number;
+
+                  const diff1 = yA1 - yB1;
+                  const diff2 = yA2 - yB2;
+
+                  // Sign change indicates intersection
+                  if (Math.sign(diff1) !== Math.sign(diff2) && Math.abs(diff1) < 1000) {
+                      // Linear interpolation for precise X
+                      const fraction = Math.abs(diff1) / (Math.abs(diff1) + Math.abs(diff2));
+                      const intersectX = x1 + fraction * (x2 - x1);
+                      const intersectY = yA1 + fraction * (yA2 - yA1);
+
+                      points.push({
+                          x: parseFloat(intersectX.toFixed(2)),
+                          y: parseFloat(intersectY.toFixed(2)),
+                          label: "Cruce",
+                          color: "#1F2937"
+                      });
+                  }
+              }
+          }
+      }
+      return points;
+  }, [generatedData, outputs, hiddenLines, primaryAxisVar]);
+
+
+  // --- HANDLERS ---
   const handleVariableChange = (symbol: string, value: number) => {
-    const newVars = { ...variables, [symbol]: value };
-    setVariables(newVars);
-    if (schema) {
-      generateDataset(schema, newVars, dataCount);
-    }
+    setVariables(prev => ({ ...prev, [symbol]: value }));
   };
 
   const toggleLineVisibility = (symbol: string) => {
     const newHidden = new Set(hiddenLines);
-    if (newHidden.has(symbol)) {
-        newHidden.delete(symbol);
-    } else {
-        newHidden.add(symbol);
-    }
+    if (newHidden.has(symbol)) newHidden.delete(symbol);
+    else newHidden.add(symbol);
     setHiddenLines(newHidden);
   };
 
@@ -163,22 +186,15 @@ const UniversalSimulator: React.FC = () => {
     const headers = Object.keys(generatedData[0]).join(",");
     const rows = generatedData.map(row => Object.values(row).join(",")).join("\n");
     const csvContent = "data:text/csv;charset=utf-8," + headers + "\n" + rows;
-    const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${schema?.title || "simulacion"}_dataset.csv`);
-    document.body.appendChild(link);
+    link.href = encodeURI(csvContent);
+    link.download = `${schema?.title || "simulacion"}_dataset.csv`;
     link.click();
-    document.body.removeChild(link);
   };
 
-  // Safe access for primary variable for chart
-  const primaryAxisVar = schema?.independentVariables?.[0];
-  const safeIndependentVariables = schema?.independentVariables || [];
-  const outputs = schema?.outputs || [];
-
+  // --- RENDER ---
   return (
-    <div className="flex flex-col h-full space-y-6 max-w-7xl mx-auto w-full pb-20">
+    <div className="flex flex-col h-full space-y-6 max-w-[1600px] mx-auto w-full pb-20">
       
       {/* Input Section */}
       <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-200 transition-all duration-500">
@@ -190,12 +206,12 @@ const UniversalSimulator: React.FC = () => {
               </div>
               <div>
                 <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Definir Problema</h2>
-                <p className="text-gray-500">Pega tus enunciados matemáticos. El sistema detectará las funciones y las resolverá.</p>
+                <p className="text-gray-500">Pega enunciados de funciones, geometría o big data. El sistema los modela automáticamente.</p>
               </div>
             </div>
             
             {errorMsg && (
-                <div className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700">
+                <div className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700 animate-pulse">
                     <AlertCircle size={20} />
                     <span className="font-medium">{errorMsg}</span>
                 </div>
@@ -205,7 +221,7 @@ const UniversalSimulator: React.FC = () => {
               <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-300 to-purple-300 rounded-2xl opacity-20 group-hover:opacity-40 transition duration-500 blur"></div>
               <textarea 
                 className="relative w-full h-48 p-6 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/50 outline-none transition-all text-gray-700 font-medium resize-none text-base shadow-inner disabled:opacity-50"
-                placeholder="Pega aquí los problemas (Ej: 'Un ciclista A viaja a 14km/h y otro B a 11km/h...')"
+                placeholder="Ejemplo: Un ciclista A viaja a 14km/h desde Panamá. Otro B sale de Colón a 11km/h. La distancia es 75km. ¿Cuándo se encuentran?"
                 value={problemText}
                 onChange={(e) => setProblemText(e.target.value)}
                 disabled={isAnalyzing}
@@ -218,12 +234,12 @@ const UniversalSimulator: React.FC = () => {
                 {isAnalyzing ? (
                     <>
                         <RefreshCw className="animate-spin" size={20}/>
-                        <span>Procesando Modelos...</span>
+                        <span>Analizando con IA...</span>
                     </>
                 ) : (
                     <>
                         <Play size={20} fill="currentColor" />
-                        <span>Resolver y Graficar</span>
+                        <span>Simular</span>
                     </>
                 )}
               </button>
@@ -234,12 +250,14 @@ const UniversalSimulator: React.FC = () => {
               <div>
                 <h2 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
                   {schema.title}
-                  <span className="px-3 py-1 bg-green-100 text-green-700 text-xs rounded-full font-bold tracking-wide uppercase shadow-sm border border-green-200">Simulación Activa</span>
+                  <span className="px-3 py-1 bg-green-100 text-green-700 text-xs rounded-full font-bold tracking-wide uppercase shadow-sm border border-green-200 flex items-center gap-1">
+                    <Activity size={12}/> Activo
+                  </span>
                 </h2>
-                <p className="text-gray-500 mt-1 max-w-3xl text-lg line-clamp-2">{schema.description}</p>
+                <p className="text-gray-500 mt-1 max-w-3xl text-lg line-clamp-1">{schema.description}</p>
               </div>
               <button 
-                onClick={() => {setSchema(null); setGeneratedData([]); setProblemText(""); setErrorMsg(null);}}
+                onClick={() => {setSchema(null); setProblemText(""); setErrorMsg(null);}}
                 className="px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors text-sm font-medium border border-transparent hover:border-red-100 whitespace-nowrap"
               >
                 Nuevo Problema
@@ -251,152 +269,120 @@ const UniversalSimulator: React.FC = () => {
       {schema && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 flex-grow animate-fade-in-up">
           
-          {/* Controls Panel */}
-          <div className="lg:col-span-4 space-y-6">
+          {/* LEFT PANEL: Controls */}
+          <div className="lg:col-span-3 space-y-6">
             
-            {/* Parameters Card */}
-            <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100">
-              <h3 className="text-lg font-bold text-gray-900 mb-6 flex items-center gap-2 border-b border-gray-100 pb-4">
-                <Activity size={20} className="text-blue-600"/>
-                Variables de Entrada
+            {/* Parameters */}
+            <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
+              <h3 className="text-sm font-bold text-gray-900 mb-4 flex items-center gap-2 uppercase tracking-wider">
+                <Activity size={16} className="text-blue-600"/> Parámetros
               </h3>
               
-              <div className="space-y-8">
-                {safeIndependentVariables.map((variable) => (
-                  <div key={variable.symbol} className="space-y-3 group">
+              <div className="space-y-6">
+                {schema.independentVariables.map((variable) => (
+                  <div key={variable.symbol} className="space-y-2 group">
                     <div className="flex justify-between items-center">
-                      <label className="text-sm font-semibold text-gray-700">
-                        {variable.name} <span className="text-gray-400 font-normal">({variable.symbol})</span>
+                      <label className="text-xs font-semibold text-gray-500 uppercase">
+                        {variable.name} <span className="text-gray-400">({variable.symbol})</span>
                       </label>
-                      <span className="px-3 py-1 bg-gray-100 rounded-lg text-sm font-mono text-gray-800 tabular-nums">
+                      <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-mono font-bold">
                         {variables[variable.symbol]}
                       </span>
                     </div>
-                    <div className="relative flex items-center">
-                         <input
-                            type="range"
-                            min={variable.min}
-                            max={variable.max}
-                            step={variable.step}
-                            value={variables[variable.symbol] || variable.default}
-                            onChange={(e) => handleVariableChange(variable.symbol, parseFloat(e.target.value))}
-                            className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-blue-600 hover:accent-blue-700 transition-all"
-                          />
-                    </div>
-                    <p className="text-xs text-gray-400">{variable.description}</p>
+                    <input
+                        type="range"
+                        min={variable.min}
+                        max={variable.max}
+                        step={variable.step}
+                        value={variables[variable.symbol] || variable.default}
+                        onChange={(e) => handleVariableChange(variable.symbol, parseFloat(e.target.value))}
+                        className="w-full h-1.5 bg-gray-200 rounded-full appearance-none cursor-pointer accent-blue-600 hover:accent-blue-700"
+                    />
                   </div>
                 ))}
                 
-                 {/* Resolution Control */}
-                <div className="space-y-3 pt-6 border-t border-gray-100">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-semibold text-gray-700">Resolución (Puntos)</label>
-                      <span className="px-3 py-1 bg-gray-100 rounded-lg text-sm font-mono text-gray-800">{dataCount}</span>
+                {/* Resolution */}
+                <div className="pt-4 border-t border-gray-50">
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Resolución</label>
+                      <span className="text-xs font-medium text-gray-400">{dataCount} pts</span>
                     </div>
                     <input
-                      type="range"
-                      min="10"
-                      max="500"
-                      step="10"
+                      type="range" min="20" max="500" step="20"
                       value={dataCount}
-                      onChange={(e) => {
-                          const val = parseInt(e.target.value);
-                          setDataCount(val);
-                          generateDataset(schema, variables, val);
-                      }}
-                      className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-purple-600"
+                      onChange={(e) => setDataCount(parseInt(e.target.value))}
+                      className="w-full h-1.5 bg-gray-200 rounded-full appearance-none cursor-pointer accent-purple-600"
                     />
                 </div>
               </div>
             </div>
 
-            {/* Visibility / Layers Control */}
-            <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100">
-                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2 border-b border-gray-100 pb-4">
-                    <Layers size={20} className="text-blue-600"/>
-                    Visualización de Capas
+            {/* Layers */}
+            <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
+                 <h3 className="text-sm font-bold text-gray-900 mb-4 flex items-center gap-2 uppercase tracking-wider">
+                    <Layers size={16} className="text-blue-600"/> Capas
                  </h3>
                  <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-1">
                     {outputs.map((out, idx) => {
                         const isHidden = hiddenLines.has(out.symbol);
-                        const color = out.color || COLORS[idx % COLORS.length];
+                        const color = out.color || getColor(idx);
                         return (
                             <button 
                                 key={out.symbol}
                                 onClick={() => toggleLineVisibility(out.symbol)}
-                                className={`w-full flex items-center justify-between p-3 rounded-xl transition-all border ${isHidden ? 'bg-gray-50 border-gray-100 opacity-60' : 'bg-white border-gray-200 hover:border-blue-300'}`}
+                                className={`w-full flex items-center justify-between p-2 rounded-lg transition-all border ${isHidden ? 'bg-gray-50 border-gray-100 opacity-60' : 'bg-white border-gray-200 hover:border-blue-300'}`}
                             >
-                                <div className="flex items-center gap-3">
-                                    <div 
-                                        className="w-3 h-3 rounded-full" 
-                                        style={{backgroundColor: isHidden ? '#9CA3AF' : color}}
-                                    />
-                                    <span className="text-sm font-medium text-gray-700 text-left">{out.name}</span>
+                                <div className="flex items-center gap-2">
+                                    <div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{backgroundColor: isHidden ? '#9CA3AF' : color}} />
+                                    <span className="text-xs font-semibold text-gray-700 truncate max-w-[120px]" title={out.name}>{out.name}</span>
                                 </div>
-                                {isHidden ? <EyeOff size={16} className="text-gray-400"/> : <Eye size={16} className="text-blue-500"/>}
+                                {isHidden ? <EyeOff size={14} className="text-gray-400"/> : <Eye size={14} className="text-blue-500"/>}
                             </button>
                         )
                     })}
                  </div>
-                 <div className="mt-4 pt-3 border-t border-gray-100 flex gap-2">
-                     <button 
-                        onClick={() => setHiddenLines(new Set())} 
-                        className="flex-1 text-xs font-semibold text-blue-600 hover:bg-blue-50 py-2 rounded-lg transition-colors"
-                     >
-                        Ver Todas
-                     </button>
-                     <button 
-                         onClick={() => {
-                             const all = new Set(outputs.map(o => o.symbol));
-                             setHiddenLines(all);
-                         }}
-                         className="flex-1 text-xs font-semibold text-gray-500 hover:bg-gray-100 py-2 rounded-lg transition-colors"
-                     >
-                        Ocultar Todas
-                     </button>
-                 </div>
             </div>
 
             {/* Actions */}
-            <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 space-y-3">
-               <button 
-                  onClick={downloadCSV}
-                  className="w-full py-3 px-4 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors border border-gray-200"
-                >
-                  <Download size={18} />
-                  Exportar CSV
+            <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100 grid grid-cols-2 gap-3">
+               <button onClick={downloadCSV} className="col-span-1 py-2 px-3 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl text-xs font-bold flex flex-col items-center justify-center gap-1 transition-colors border border-gray-200">
+                  <Download size={16} /> CSV
                 </button>
-                 <button 
-                  onClick={() => setViewMode(viewMode === 'chart' ? 'table' : 'chart')}
-                  className="w-full py-3 px-4 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors border border-gray-200"
-                >
-                   {viewMode === 'chart' ? <Table size={18} /> : <BarChart2 size={18} />}
-                   {viewMode === 'chart' ? 'Ver Tabla de Datos' : 'Ver Gráfica'}
+                 <button onClick={() => setViewMode(viewMode === 'chart' ? 'table' : 'chart')} className="col-span-1 py-2 px-3 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl text-xs font-bold flex flex-col items-center justify-center gap-1 transition-colors border border-gray-200">
+                   {viewMode === 'chart' ? <Table size={16} /> : <BarChart2 size={16} />}
+                   {viewMode === 'chart' ? 'Tabla' : 'Gráfica'}
                 </button>
             </div>
           </div>
 
-          {/* Visualization Panel */}
-          <div className="lg:col-span-8 flex flex-col gap-6">
+          {/* MAIN PANEL: Visualization & Analysis */}
+          <div className="lg:col-span-9 flex flex-col gap-6">
             
-            {/* Chart/Table Container */}
-            <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 h-[600px] flex flex-col relative overflow-hidden">
+            {/* 1. CHART AREA */}
+            <div className="bg-white rounded-3xl p-2 shadow-sm border border-gray-100 h-[600px] flex flex-col relative overflow-hidden group">
+               
+               {/* Toolbar overlay */}
+               <div className="absolute top-4 right-4 z-10 bg-white/80 backdrop-blur border border-gray-200 rounded-lg p-1 flex gap-1 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity">
+                   <div className="px-2 py-1 text-xs font-medium text-gray-500">Zoom con slider inferior</div>
+                   <Search size={14} className="text-gray-400"/>
+               </div>
+
                {viewMode === 'chart' ? (
-                 <div className="w-full h-full">
+                 <div className="w-full h-full p-2">
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={generatedData} margin={{ top: 20, right: 30, left: 10, bottom: 20 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                        <LineChart data={generatedData} margin={{ top: 20, right: 30, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F3F4F6" />
                         <XAxis 
                             dataKey={primaryAxisVar?.symbol} 
-                            label={{ value: primaryAxisVar?.name, position: 'insideBottomRight', offset: -10 }} 
                             stroke="#9CA3AF"
-                            tick={{fontSize: 12}}
+                            tick={{fontSize: 11, fill: '#6B7280'}}
                             tickLine={false}
                             axisLine={false}
+                            minTickGap={30}
                         />
                         <YAxis 
                             stroke="#9CA3AF"
-                            tick={{fontSize: 12}}
+                            tick={{fontSize: 11, fill: '#6B7280'}}
                             tickLine={false}
                             axisLine={false}
                         />
@@ -404,14 +390,30 @@ const UniversalSimulator: React.FC = () => {
                             contentStyle={{ 
                                 backgroundColor: 'rgba(255, 255, 255, 0.95)', 
                                 borderRadius: '12px', 
-                                border: 'none', 
-                                boxShadow: '0 4px 20px rgba(0,0,0,0.1)' 
+                                border: '1px solid #E5E7EB', 
+                                boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1)',
+                                padding: '12px'
                             }}
-                            itemStyle={{ color: '#374151', fontSize: '13px', fontWeight: 500 }}
-                            labelStyle={{ color: '#9CA3AF', marginBottom: '8px' }}
+                            itemStyle={{ fontSize: '12px', fontWeight: 600, padding: '2px 0' }}
+                            labelStyle={{ color: '#6B7280', marginBottom: '8px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}
                         />
-                        <Legend verticalAlign="top" height={36}/>
+                        <Legend wrapperStyle={{paddingTop: '20px'}} iconType="circle"/>
                         
+                        {/* Render Intersections */}
+                        {intersections.map((point, i) => (
+                             <ReferenceDot 
+                                key={i} 
+                                x={point.x} 
+                                y={point.y} 
+                                r={5} 
+                                fill="#EF4444" 
+                                stroke="#fff" 
+                                strokeWidth={2}
+                                isFront={true}
+                             >
+                             </ReferenceDot>
+                        ))}
+
                         {outputs.map((output, index) => (
                             !hiddenLines.has(output.symbol) && (
                                 <Line 
@@ -419,36 +421,45 @@ const UniversalSimulator: React.FC = () => {
                                     type="monotone" 
                                     dataKey={output.symbol} 
                                     name={output.name}
-                                    stroke={output.color || COLORS[index % COLORS.length]} 
+                                    stroke={output.color || getColor(index)} 
                                     strokeWidth={3} 
                                     dot={false} 
-                                    activeDot={{ r: 6, strokeWidth: 0 }}
-                                    isAnimationActive={false} // Smoother toggling
+                                    activeDot={{ r: 6, strokeWidth: 0, fill: output.color || getColor(index) }}
+                                    isAnimationActive={false} 
                                 />
                             )
                         ))}
+                        
+                        {/* Zoom Brush */}
+                        <Brush 
+                            dataKey={primaryAxisVar?.symbol} 
+                            height={30} 
+                            stroke="#E5E7EB"
+                            fill="#F9FAFB"
+                            tickFormatter={() => ""} 
+                        />
                         </LineChart>
                     </ResponsiveContainer>
                  </div>
                ) : (
-                 <div className="w-full h-full overflow-auto custom-scrollbar">
-                    <table className="w-full text-sm text-left text-gray-500">
-                        <thead className="text-xs text-gray-700 uppercase bg-gray-50 sticky top-0">
+                 <div className="w-full h-full overflow-auto custom-scrollbar p-4">
+                    <table className="w-full text-sm text-left text-gray-500 border-separate border-spacing-0">
+                        <thead className="text-xs text-gray-700 uppercase bg-gray-50 sticky top-0 z-10">
                             <tr>
-                                <th className="px-6 py-3 rounded-tl-lg">{primaryAxisVar?.symbol}</th>
+                                <th className="px-6 py-3 border-b border-gray-200 font-bold">{primaryAxisVar?.name}</th>
                                 {outputs.map((out) => (
-                                    <th key={out.symbol} className="px-6 py-3">{out.name} ({out.symbol})</th>
+                                    <th key={out.symbol} className="px-6 py-3 border-b border-gray-200 font-bold">{out.name}</th>
                                 ))}
                             </tr>
                         </thead>
                         <tbody>
                             {generatedData.map((row, i) => (
-                                <tr key={i} className="bg-white border-b hover:bg-gray-50">
-                                    <td className="px-6 py-4 font-medium text-gray-900">
+                                <tr key={i} className="bg-white hover:bg-gray-50 transition-colors">
+                                    <td className="px-6 py-3 font-medium text-gray-900 border-b border-gray-100 font-mono">
                                         {row[primaryAxisVar?.symbol as string]}
                                     </td>
                                     {outputs.map((out) => (
-                                        <td key={out.symbol} className="px-6 py-4">
+                                        <td key={out.symbol} className="px-6 py-3 border-b border-gray-100 font-mono text-gray-600">
                                             {row[out.symbol]}
                                         </td>
                                     ))}
@@ -460,54 +471,57 @@ const UniversalSimulator: React.FC = () => {
                )}
             </div>
 
-            {/* Markdown Analysis */}
-            <div ref={analysisRef} className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100">
+            {/* 2. ANALYSIS CARD */}
+            <div ref={analysisRef} className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100 relative overflow-hidden">
+                {/* Decorative background element */}
+                <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-bl from-blue-50 to-transparent rounded-bl-full opacity-50 pointer-events-none"></div>
+
                 <button 
                   onClick={() => setShowAnalysis(!showAnalysis)}
-                  className="w-full flex justify-between items-center text-left mb-6 focus:outline-none group"
+                  className="w-full flex justify-between items-center text-left mb-6 focus:outline-none group relative z-10"
                 >
-                    <div className="flex items-center gap-3">
-                        <div className="bg-purple-100 p-2 rounded-lg text-purple-600 group-hover:bg-purple-200 transition-colors">
+                    <div className="flex items-center gap-4">
+                        <div className="bg-blue-600 p-2.5 rounded-xl text-white shadow-lg shadow-blue-200 group-hover:scale-105 transition-transform">
                             <FileText size={20} />
                         </div>
-                        <h3 className="text-xl font-bold text-gray-900 group-hover:text-purple-700 transition-colors">
-                            Análisis Matemático & Big Data
-                        </h3>
+                        <div>
+                            <h3 className="text-xl font-bold text-gray-900 group-hover:text-blue-700 transition-colors">
+                                Informe Matemático
+                            </h3>
+                            <p className="text-sm text-gray-400 font-medium">Generado por IA • {new Date().toLocaleDateString()}</p>
+                        </div>
                     </div>
-                    {showAnalysis ? <ChevronUp className="text-gray-400" /> : <ChevronDown className="text-gray-400" />}
+                    <div className={`p-2 rounded-full bg-gray-100 text-gray-500 transition-transform duration-300 ${showAnalysis ? 'rotate-180' : ''}`}>
+                         <ChevronDown size={20} />
+                    </div>
                 </button>
                 
                 {showAnalysis && (
-                     <div className="prose prose-blue max-w-none">
-                        <ReactMarkdown 
-                            components={{
-                                h1: ({node, ...props}) => <h1 className="text-2xl font-bold text-gray-900 mb-4 pb-2 border-b border-gray-100" {...props} />,
-                                h2: ({node, ...props}) => <h2 className="text-xl font-semibold text-gray-800 mt-6 mb-3" {...props} />,
-                                h3: ({node, ...props}) => <h3 className="text-lg font-semibold text-gray-700 mt-4 mb-2" {...props} />,
-                                p: ({node, ...props}) => <p className="text-gray-600 leading-relaxed mb-4" {...props} />,
-                                ul: ({node, ...props}) => <ul className="list-disc pl-5 space-y-2 text-gray-600 mb-4" {...props} />,
-                                li: ({node, ...props}) => <li className="pl-1" {...props} />,
-                                strong: ({node, ...props}) => <strong className="text-gray-900 font-semibold" {...props} />,
-                                code: ({node, ...props}) => <code className="bg-gray-100 text-pink-600 px-1.5 py-0.5 rounded text-sm font-mono" {...props} />,
-                            }}
-                        >
+                     <div className="prose prose-slate max-w-none prose-headings:font-bold prose-headings:tracking-tight prose-p:text-gray-600 prose-a:text-blue-600 prose-code:text-pink-600 prose-code:bg-gray-100 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none">
+                        <ReactMarkdown>
                             {schema.analysisMarkdown}
                         </ReactMarkdown>
                      </div>
                 )}
             </div>
             
-            {/* Source Code View */}
-            <div className="bg-gray-900 rounded-3xl p-6 shadow-lg text-gray-300 font-mono text-sm overflow-hidden">
-                <div className="flex items-center gap-2 mb-4 text-gray-400 border-b border-gray-700 pb-2">
-                    <Code size={16} />
-                    <span>Motor de Simulación (JavaScript Generado)</span>
+            {/* 3. CODE CARD */}
+            <div className="bg-[#1E1E1E] rounded-3xl p-6 shadow-xl text-gray-300 font-mono text-sm overflow-hidden border border-gray-800">
+                <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-800">
+                    <div className="flex items-center gap-2 text-gray-400">
+                        <Code size={16} />
+                        <span className="font-bold text-xs uppercase tracking-widest">Motor JS</span>
+                    </div>
+                    <div className="flex gap-1.5">
+                        <div className="w-3 h-3 rounded-full bg-red-500/20 border border-red-500/50"></div>
+                        <div className="w-3 h-3 rounded-full bg-yellow-500/20 border border-yellow-500/50"></div>
+                        <div className="w-3 h-3 rounded-full bg-green-500/20 border border-green-500/50"></div>
+                    </div>
                 </div>
-                <div className="overflow-x-auto">
-                    <pre>
-{`// Función generada por IA para este modelo
-function calculate(${safeIndependentVariables.map(v => v.symbol).join(", ")}) {
-  ${schema.jsFormula}
+                <div className="overflow-x-auto custom-scrollbar">
+                    <pre className="text-blue-300">
+{`function simulate(${primaryAxisVar?.symbol || 'x'}) {
+  ${schema.jsFormula.split('\n').join('\n  ')}
 }`}
                     </pre>
                 </div>

@@ -5,13 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Math Simulator Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" integrity="sha384-GvrOXuhMATgEsSwCs4smul74iXGOixntILdUW9XmUC6+HX0sLNAK3q71HotJqlAn" crossorigin="anonymous">
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+      
       body {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         background-color: #F5F5F7; /* Apple gray background */
       }
-      /* Custom Scrollbar for sleek look */
+      
+      /* Custom Scrollbar */
       ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
@@ -25,6 +29,12 @@
       }
       ::-webkit-scrollbar-thumb:hover {
         background: #8E8E93; 
+      }
+
+      /* Chart Tooltip Customization */
+      .recharts-tooltip-cursor {
+        stroke: #9CA3AF;
+        stroke-dasharray: 3 3;
       }
     </style>
   <script type="importmap">
