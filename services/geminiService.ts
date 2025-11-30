@@ -3,12 +3,27 @@ import { SimulationSchema } from "../types";
 
 const modelId = 'gemini-2.5-flash';
 
-// Helper to get the AI client only when needed (Lazy Loading)
-// This prevents the app from crashing on startup if the API KEY is missing
+// Helper to safely access environment variables without crashing in browser
+const getApiKey = (): string => {
+    try {
+        // Check if process is defined (Node/Build env)
+        if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+            return process.env.API_KEY;
+        }
+        // Check window (Browser injection)
+        if (typeof window !== 'undefined' && (window as any).API_KEY) {
+            return (window as any).API_KEY;
+        }
+    } catch (e) {
+        // Ignore errors accessing process/window
+    }
+    return '';
+};
+
 const getAiClient = () => {
-  const apiKey = process.env.API_KEY || (window as any).API_KEY || ''; // Try multiple sources
+  const apiKey = getApiKey();
   if (!apiKey) {
-    throw new Error("Falta la API KEY. Configúrala en Vercel (Settings -> Environment Variables -> API_KEY).");
+    throw new Error("Falta la API KEY. Por favor configura la variable de entorno API_KEY en Vercel.");
   }
   return new GoogleGenAI({ apiKey });
 };
@@ -29,7 +44,6 @@ const cleanJsonText = (text: string): string => {
 
 export const analyzeProblemForSimulation = async (problemText: string): Promise<SimulationSchema> => {
   try {
-    // Initialize client HERE, not at the top of the file
     const ai = getAiClient();
 
     const prompt = `
