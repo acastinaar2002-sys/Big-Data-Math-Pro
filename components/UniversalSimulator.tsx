@@ -1,14 +1,41 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot, Brush, ReferenceLine } from 'recharts';
+import React, { useState, useRef, useMemo } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot, Brush, TooltipProps } from 'recharts';
 import { analyzeProblemForSimulation } from '../services/geminiService';
-import { SimulationSchema, DataPoint } from '../types';
-import { Play, Download, Table, Code, Activity, RefreshCw, ChevronDown, ChevronUp, FileText, BarChart2, AlertCircle, Eye, EyeOff, Layers, ZoomIn, Search } from 'lucide-react';
+import { SimulationSchema, DataPoint, VariableDef, OutputVariable } from '../types';
+import { Play, Download, Table, Code, Activity, RefreshCw, ChevronDown, FileText, BarChart2, AlertCircle, Eye, EyeOff, Layers, Search } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 // Dynamic color generator for infinite lines
 const getColor = (index: number) => {
   const hue = (index * 137.508) % 360; // Golden angle approximation
   return `hsl(${hue}, 70%, 50%)`;
+};
+
+// --- SMART TOOLTIP COMPONENT ---
+// Explicitly typed to satisfy Vercel build requirements
+const CustomTooltip = ({ active, payload, label, primaryVarSymbol }: TooltipProps<number, string> & { primaryVarSymbol?: string }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-white/95 backdrop-blur-md border border-gray-200 p-4 rounded-2xl shadow-xl text-xs font-sans">
+        <div className="mb-2 pb-2 border-b border-gray-100">
+            <span className="uppercase tracking-widest text-gray-400 font-bold text-[10px]">{primaryVarSymbol || 'X'}</span>
+            <p className="text-lg font-bold text-gray-900 font-mono">{Number(label).toFixed(2)}</p>
+        </div>
+        <div className="space-y-1">
+          {payload.map((entry: any, index: number) => (
+            <div key={index} className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
+                <span className="font-medium text-gray-600">{entry.name}:</span>
+              </div>
+              <span className="font-mono font-bold text-gray-900">{Number(entry.value).toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return null;
 };
 
 const UniversalSimulator: React.FC = () => {
@@ -53,7 +80,7 @@ const UniversalSimulator: React.FC = () => {
       if (result.independentVariables && Array.isArray(result.independentVariables)) {
         result.independentVariables.forEach(v => {
             if (v && v.symbol) {
-            initialVars[v.symbol] = v.default;
+              initialVars[v.symbol] = v.default;
             }
         });
       }
@@ -78,23 +105,25 @@ const UniversalSimulator: React.FC = () => {
           return { generatedData: [], primaryAxisVar: null, outputs: [] };
       }
 
-      const primaryVar = schema.independentVariables[0];
-      const outs = schema.outputs || [];
+      const primaryVar: VariableDef = schema.independentVariables[0];
+      const outs: OutputVariable[] = schema.outputs || [];
       const data: DataPoint[] = [];
 
-      // Safety check
+      // Safety check with defaults
       const minVal = typeof primaryVar.min === 'number' ? primaryVar.min : -10;
       const maxVal = typeof primaryVar.max === 'number' ? primaryVar.max : 10;
-      const step = (maxVal - minVal) / dataCount;
+      // Ensure dataCount is valid
+      const safeDataCount = dataCount > 0 ? dataCount : 100;
+      const step = (maxVal - minVal) / safeDataCount;
 
-      for (let i = 0; i <= dataCount; i++) {
+      for (let i = 0; i <= safeDataCount; i++) {
           const currentX = parseFloat((minVal + (i * step)).toFixed(2));
           const contextVars = { ...variables, [primaryVar.symbol]: currentX };
           
           try {
               const keys = Object.keys(contextVars);
               const values = Object.values(contextVars);
-              // Function construction
+              // Function construction - eslint-disable-next-line
               const func = new Function(...keys, schema.jsFormula);
               const resultRaw = func(...values);
 
@@ -123,7 +152,7 @@ const UniversalSimulator: React.FC = () => {
 
   // --- 3. INTERSECTION DETECTION ENGINE ---
   const intersections = useMemo(() => {
-      if (!generatedData.length || outputs.length < 2) return [];
+      if (!generatedData.length || outputs.length < 2 || !primaryAxisVar) return [];
       const points: {x: number, y: number, label: string, color: string}[] = [];
       const activeOutputs = outputs.filter(o => !hiddenLines.has(o.symbol));
 
@@ -136,14 +165,16 @@ const UniversalSimulator: React.FC = () => {
                   const p1 = generatedData[k];
                   const p2 = generatedData[k+1];
                   
-                  if (!primaryAxisVar) continue;
+                  const x1 = Number(p1[primaryAxisVar.symbol]);
+                  const x2 = Number(p2[primaryAxisVar.symbol]);
                   
-                  const x1 = p1[primaryAxisVar.symbol] as number;
-                  const x2 = p2[primaryAxisVar.symbol] as number;
-                  const yA1 = p1[lineA.symbol] as number;
-                  const yB1 = p1[lineB.symbol] as number;
-                  const yA2 = p2[lineA.symbol] as number;
-                  const yB2 = p2[lineB.symbol] as number;
+                  // Safe access to y values
+                  const yA1 = Number(p1[lineA.symbol]);
+                  const yB1 = Number(p1[lineB.symbol]);
+                  const yA2 = Number(p2[lineA.symbol]);
+                  const yB2 = Number(p2[lineB.symbol]);
+
+                  if (isNaN(yA1) || isNaN(yB1) || isNaN(yA2) || isNaN(yB2)) continue;
 
                   const diff1 = yA1 - yB1;
                   const diff2 = yA2 - yB2;
@@ -159,7 +190,7 @@ const UniversalSimulator: React.FC = () => {
                           x: parseFloat(intersectX.toFixed(2)),
                           y: parseFloat(intersectY.toFixed(2)),
                           label: "Cruce",
-                          color: "#1F2937"
+                          color: "#EF4444"
                       });
                   }
               }
@@ -234,7 +265,7 @@ const UniversalSimulator: React.FC = () => {
                 {isAnalyzing ? (
                     <>
                         <RefreshCw className="animate-spin" size={20}/>
-                        <span>Analizando con IA...</span>
+                        <span>Analizando...</span>
                     </>
                 ) : (
                     <>
@@ -362,8 +393,8 @@ const UniversalSimulator: React.FC = () => {
             <div className="bg-white rounded-3xl p-2 shadow-sm border border-gray-100 h-[600px] flex flex-col relative overflow-hidden group">
                
                {/* Toolbar overlay */}
-               <div className="absolute top-4 right-4 z-10 bg-white/80 backdrop-blur border border-gray-200 rounded-lg p-1 flex gap-1 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity">
-                   <div className="px-2 py-1 text-xs font-medium text-gray-500">Zoom con slider inferior</div>
+               <div className="absolute top-4 right-4 z-10 bg-white/80 backdrop-blur border border-gray-200 rounded-lg p-1 flex gap-1 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                   <div className="px-2 py-1 text-xs font-medium text-gray-500">Zoom activo con Slider</div>
                    <Search size={14} className="text-gray-400"/>
                </div>
 
@@ -387,31 +418,23 @@ const UniversalSimulator: React.FC = () => {
                             axisLine={false}
                         />
                         <Tooltip 
-                            contentStyle={{ 
-                                backgroundColor: 'rgba(255, 255, 255, 0.95)', 
-                                borderRadius: '12px', 
-                                border: '1px solid #E5E7EB', 
-                                boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1)',
-                                padding: '12px'
-                            }}
-                            itemStyle={{ fontSize: '12px', fontWeight: 600, padding: '2px 0' }}
-                            labelStyle={{ color: '#6B7280', marginBottom: '8px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}
+                            content={<CustomTooltip primaryVarSymbol={primaryAxisVar?.symbol} />}
                         />
                         <Legend wrapperStyle={{paddingTop: '20px'}} iconType="circle"/>
                         
                         {/* Render Intersections */}
                         {intersections.map((point, i) => (
                              <ReferenceDot 
-                                key={i} 
+                                key={`intersect-${i}`} 
                                 x={point.x} 
                                 y={point.y} 
-                                r={5} 
+                                r={6} 
                                 fill="#EF4444" 
                                 stroke="#fff" 
-                                strokeWidth={2}
+                                strokeWidth={3}
                                 isFront={true}
-                             >
-                             </ReferenceDot>
+                                label={{ value: point.label, position: 'top', fill: '#EF4444', fontSize: 10, fontWeight: 700 }}
+                             />
                         ))}
 
                         {outputs.map((output, index) => (
@@ -446,9 +469,9 @@ const UniversalSimulator: React.FC = () => {
                     <table className="w-full text-sm text-left text-gray-500 border-separate border-spacing-0">
                         <thead className="text-xs text-gray-700 uppercase bg-gray-50 sticky top-0 z-10">
                             <tr>
-                                <th className="px-6 py-3 border-b border-gray-200 font-bold">{primaryAxisVar?.name}</th>
+                                <th className="px-6 py-3 border-b border-gray-200 font-bold bg-gray-50">{primaryAxisVar?.name}</th>
                                 {outputs.map((out) => (
-                                    <th key={out.symbol} className="px-6 py-3 border-b border-gray-200 font-bold">{out.name}</th>
+                                    <th key={out.symbol} className="px-6 py-3 border-b border-gray-200 font-bold bg-gray-50">{out.name}</th>
                                 ))}
                             </tr>
                         </thead>
